@@ -5,7 +5,7 @@ Suporta App ID alfanumérico (ex: 33wQj4vvambGV9iRyHOTh).
 Fluxo: get_authorization_url() → callback com ?code= → exchange_code_for_token()
 O access_token resultante é usado no DerivAPIClient para autenticar o WebSocket.
 
-Docs: https://developers.deriv.com/docs/oauth
+Referência: https://developers.deriv.com/docs/oauth
 """
 
 import asyncio
@@ -26,8 +26,8 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 # ─── Configuração ─────────────────────────────────────────────────────────────
-DERIV_APP_ID   = os.getenv("DERIV_APP_ID", "")
-OAUTH_REDIRECT = os.getenv("OAUTH_REDIRECT_URI", "http://localhost:8080/callback")
+DERIV_APP_ID   = os.getenv("DERIV_APP_ID", "").strip()
+OAUTH_REDIRECT = os.getenv("OAUTH_REDIRECT_URI", "http://localhost:8080/callback").strip()
 
 OAUTH_AUTHORIZE_URL = "https://oauth.deriv.com/oauth2/authorize"
 OAUTH_TOKEN_URL     = "https://oauth.deriv.com/oauth2/token"
@@ -42,7 +42,7 @@ SCOPES_ALL     = ["read", "trade", "trading_information", "payments", "admin"]
 
 @dataclass
 class OAuthToken:
-    """Representa um token de acesso OAuth 2.0 da Deriv."""
+    """Representa um access token OAuth 2.0 da Deriv."""
     access_token:  str
     token_type:    str       = "Bearer"
     expires_in:    int       = 3600
@@ -53,7 +53,7 @@ class OAuthToken:
 
     @property
     def is_expired(self) -> bool:
-        """True se o token expirou (com margem de 60s)."""
+        """True se o token expirou (margem de 60s)."""
         return time.time() >= (self.issued_at + self.expires_in - 60)
 
     @property
@@ -86,8 +86,8 @@ class OAuthToken:
         )
 
     def mask(self) -> str:
-        """Token mascarado para logging seguro."""
-        return self.access_token[:12] + "..." if self.access_token else "(vazio)"
+        """Prefixo mascarado para logging seguro."""
+        return (self.access_token[:12] + "...") if self.access_token else "(vazio)"
 
 
 # ─── Estado PKCE ──────────────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ class PKCEState:
 
     @property
     def code_challenge(self) -> str:
-        """SHA-256 do code_verifier, Base64url sem padding."""
+        """SHA-256 do code_verifier codificado em Base64url sem padding."""
         import base64
         digest = hashlib.sha256(self.code_verifier.encode()).digest()
         return base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
@@ -110,24 +110,24 @@ class PKCEState:
 
 class DerivOAuthClient:
     """
-    Fluxo Authorization Code + PKCE para a Deriv API.
+    Implementa o fluxo Authorization Code + PKCE para a Deriv API.
 
-    Exemplo de uso completo (CLI/dev):
+    Uso CLI/desenvolvimento:
         oauth = DerivOAuthClient()
         url, pkce = oauth.get_authorization_url()
         print(f"Acesse: {url}")
         code, state = await oauth.run_local_callback_server()
         token = await oauth.exchange_code_for_token(code, state, pkce)
-        # Agora use token.access_token no DerivAPIClient
+        # token.access_token pronto para usar no DerivAPIClient
 
-    Exemplo de uso em web app:
+    Uso em web app:
         url, pkce = oauth.get_authorization_url()
-        # redirecione o usuário para url
+        # redireciona usuário para url
         # no endpoint /callback:
         token = await oauth.exchange_code_for_token(
             request.query["code"],
             request.query["state"],
-            pkce,  # guardado na sessão
+            pkce,  # salvo na sessão
         )
     """
 
@@ -136,19 +136,19 @@ class DerivOAuthClient:
         app_id: str = DERIV_APP_ID,
         redirect_uri: str = OAUTH_REDIRECT,
         scopes: Optional[List[str]] = None,
-    ):
-        if not app_id:
+    ) -> None:
+        if not app_id or app_id == "SEU_APP_ID_AQUI":
             raise EnvironmentError(
-                "DERIV_APP_ID não encontrado no .env\n"
-                "Gere em: https://developers.deriv.com"
+                "DERIV_APP_ID não configurado no .env\n"
+                "Gere em: https://developers.deriv.com → My Apps → Register"
             )
         self.app_id       = app_id
         self.redirect_uri = redirect_uri
         self.scopes       = scopes or SCOPES_DEFAULT
-        # state → PKCEState (armazenamento em memória; use Redis/DB em produção)
+        # state → PKCEState (em memória; use Redis/DB em produção)
         self._pkce_store: Dict[str, PKCEState] = {}
 
-    # ─── Passo 1: URL de autorização ──────────────────────────────────────────
+    # ── Passo 1: URL de autorização ───────────────────────────────────────────
 
     def get_authorization_url(
         self,
@@ -156,8 +156,8 @@ class DerivOAuthClient:
         use_pkce: bool = True,
     ) -> Tuple[str, PKCEState]:
         """
-        Gera a URL para redirecionar o usuário.
-        Retorna (url, pkce_state) — guarde pkce_state para o próximo passo.
+        Gera a URL para redirecionar o usuário ao portal Deriv.
+        Retorna (url, pkce_state) — guarde pkce_state para o passo 2.
         """
         pkce = PKCEState()
         self._pkce_store[pkce.state] = pkce
@@ -175,10 +175,10 @@ class DerivOAuthClient:
             params["code_challenge_method"] = "S256"
 
         url = f"{OAUTH_AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
-        logger.info(f"URL OAuth gerada | scopes={scopes} | state={pkce.state[:8]}...")
+        logger.info("URL OAuth gerada | scopes=%s | state=%s...", scopes, pkce.state[:8])
         return url, pkce
 
-    # ─── Passo 2: Troca de código por token ───────────────────────────────────
+    # ── Passo 2: Troca de código por token ────────────────────────────────────
 
     async def exchange_code_for_token(
         self,
@@ -187,28 +187,28 @@ class DerivOAuthClient:
         pkce: Optional[PKCEState] = None,
     ) -> OAuthToken:
         """
-        Troca o authorization code por access_token.
-        Valida o state para prevenir CSRF.
+        Troca o authorization_code por access_token.
+        Valida o state para prevenir ataques CSRF.
         """
         stored_pkce = pkce or self._pkce_store.pop(state, None)
         if stored_pkce is None:
             raise ValueError(
                 f"State inválido ou expirado: '{state[:12]}...'. "
-                "Possível ataque CSRF — rejeitando."
+                "Possível ataque CSRF — requisição rejeitada."
             )
         if stored_pkce.state != state:
-            raise ValueError("State não confere. Requisição rejeitada.")
+            raise ValueError("State PKCE não confere. Requisição rejeitada.")
 
         payload: Dict = {
-            "grant_type":    "authorization_code",
-            "code":          code,
-            "redirect_uri":  self.redirect_uri,
-            "app_id":        self.app_id,
+            "grant_type":   "authorization_code",
+            "code":         code,
+            "redirect_uri": self.redirect_uri,
+            "app_id":       self.app_id,
         }
         if stored_pkce:
             payload["code_verifier"] = stored_pkce.code_verifier
 
-        logger.info("Trocando authorization code por access_token...")
+        logger.info("Trocando authorization_code por access_token...")
         data = await self._post(OAUTH_TOKEN_URL, payload)
 
         token = OAuthToken(
@@ -219,12 +219,12 @@ class DerivOAuthClient:
             scopes        = data.get("scope", "").split() if data.get("scope") else self.scopes,
         )
         logger.info(
-            f"✓ Token obtido | expira: {token.expires_at_str} | "
-            f"scopes={token.scopes} | token={token.mask()}"
+            "Token obtido | expira: %s | scopes=%s | token=%s",
+            token.expires_at_str, token.scopes, token.mask(),
         )
         return token
 
-    # ─── Refresh ──────────────────────────────────────────────────────────────
+    # ── Refresh ───────────────────────────────────────────────────────────────
 
     async def refresh_access_token(self, token: OAuthToken) -> OAuthToken:
         """Renova o access_token usando o refresh_token."""
@@ -237,7 +237,6 @@ class DerivOAuthClient:
             "refresh_token": token.refresh_token,
             "app_id":        self.app_id,
         })
-
         new_token = OAuthToken(
             access_token  = data["access_token"],
             token_type    = data.get("token_type", "Bearer"),
@@ -246,10 +245,10 @@ class DerivOAuthClient:
             scopes        = token.scopes,
             loginid       = token.loginid,
         )
-        logger.info(f"✓ Token renovado | expira: {new_token.expires_at_str}")
+        logger.info("Token renovado | expira: %s", new_token.expires_at_str)
         return new_token
 
-    # ─── Auto-refresh ─────────────────────────────────────────────────────────
+    # ── Auto-refresh ──────────────────────────────────────────────────────────
 
     async def get_valid_token(
         self,
@@ -257,8 +256,8 @@ class DerivOAuthClient:
         auto_refresh: bool = True,
     ) -> OAuthToken:
         """
-        Retorna o token se válido, ou renova automaticamente.
-        Chame antes de cada requisição sensível.
+        Retorna o token se válido, ou renova automaticamente se expirado.
+        Chame antes de cada operação sensível.
         """
         if not token.is_expired:
             return token
@@ -270,7 +269,7 @@ class DerivOAuthClient:
             "Re-autentique via get_authorization_url()."
         )
 
-    # ─── Revogação ────────────────────────────────────────────────────────────
+    # ── Revogação ─────────────────────────────────────────────────────────────
 
     async def revoke_token(self, token: OAuthToken) -> bool:
         """Revoga o access_token (logout)."""
@@ -282,10 +281,10 @@ class DerivOAuthClient:
             logger.info("Token revogado com sucesso.")
             return True
         except Exception as e:
-            logger.warning(f"Falha ao revogar token: {e}")
+            logger.warning("Falha ao revogar token: %s", e)
             return False
 
-    # ─── Servidor de callback local ───────────────────────────────────────────
+    # ── Servidor de callback local ────────────────────────────────────────────
 
     async def run_local_callback_server(
         self,
@@ -294,14 +293,8 @@ class DerivOAuthClient:
         timeout: int = 120,
     ) -> Tuple[str, str]:
         """
-        Servidor HTTP local temporário para capturar o callback OAuth.
+        Servidor HTTP temporário para capturar o redirect OAuth.
         Retorna (code, state). Use apenas em desenvolvimento/CLI.
-
-        Exemplo:
-            url, pkce = oauth.get_authorization_url()
-            print(f"Acesse: {url}")
-            code, state = await oauth.run_local_callback_server()
-            token = await oauth.exchange_code_for_token(code, state, pkce)
         """
         from aiohttp import web
 
@@ -314,7 +307,7 @@ class DerivOAuthClient:
             result["error"] = req.rel_url.query.get("error", "")
             done.set()
             return web.Response(
-                text="<h2>✓ Autenticado! Pode fechar esta janela.</h2>",
+                text="<h2 style='font-family:sans-serif;color:green'>Autenticado! Pode fechar esta aba.</h2>",
                 content_type="text/html",
             )
 
@@ -323,13 +316,13 @@ class DerivOAuthClient:
         runner = web.AppRunner(app)
         await runner.setup()
         await web.TCPSite(runner, host, port).start()
-        logger.info(f"Aguardando callback em http://{host}:{port}/callback")
+        logger.info("Aguardando callback em http://%s:%d/callback", host, port)
 
         try:
             await asyncio.wait_for(done.wait(), timeout=timeout)
         except asyncio.TimeoutError:
             raise TimeoutError(
-                f"Timeout: nenhum callback em {timeout}s. Tente novamente."
+                f"Timeout: nenhum callback recebido em {timeout}s."
             )
         finally:
             await runner.cleanup()
@@ -339,10 +332,10 @@ class DerivOAuthClient:
 
         return result["code"], result["state"]
 
-    # ─── HTTP helper ──────────────────────────────────────────────────────────
+    # ── HTTP helper ───────────────────────────────────────────────────────────
 
     async def _post(self, url: str, payload: Dict) -> Dict:
-        """POST form-encoded com tratamento de erro unificado."""
+        """POST form-encoded com tratamento de erros unificado."""
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 url,
@@ -363,12 +356,12 @@ async def authenticate_interactive(
     scopes: Optional[List[str]] = None,
 ) -> OAuthToken:
     """
-    Fluxo completo OAuth 2.0 para CLI/desenvolvimento.
-    Abre o browser, aguarda o callback e retorna o token.
+    Fluxo completo OAuth 2.0 + PKCE para CLI/desenvolvimento.
+    Abre o browser, aguarda callback e retorna o token.
 
     Uso:
         token = await authenticate_interactive()
-        # use token.access_token no DerivAPIClient
+        # token.access_token → use no DerivAPIClient
     """
     import webbrowser
 
@@ -385,8 +378,8 @@ async def authenticate_interactive(
     code, state = await oauth.run_local_callback_server()
     token = await oauth.exchange_code_for_token(code, state, pkce)
 
-    print(f"\n✓ Autenticado!")
-    print(f"  Token: {token.mask()}")
-    print(f"  Expira: {token.expires_at_str}")
-    print(f"  Scopes: {', '.join(token.scopes)}\n")
+    print(f"\nAutenticado!")
+    print(f"  Token  : {token.mask()}")
+    print(f"  Expira : {token.expires_at_str}")
+    print(f"  Scopes : {', '.join(token.scopes)}\n")
     return token
