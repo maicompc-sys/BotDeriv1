@@ -3,6 +3,7 @@ Janela Principal - Interface Institucional Level
 Layout: Sidebar | Tick Monitor Central | Strategy Panel
 """
 import sys
+import os
 from datetime import datetime
 from collections import deque
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -21,6 +22,27 @@ from ui.tick_monitor import TickMonitorWidget
 from ui.strategy_panel import StrategyPanel
 from ui.trade_panel import TradePanel
 from ui.styles import DARK_STYLE
+
+
+def _load_env_var(key: str, default: str = "") -> str:
+    """Lê variável do .env usando python-dotenv se disponível, senão lê manualmente."""
+    # Tenta python-dotenv primeiro
+    try:
+        from dotenv import load_dotenv
+        # Carrega .env da raiz do projeto (um nível acima de ui/)
+        env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+        load_dotenv(env_path, override=False)
+    except ImportError:
+        # Fallback: lê .env manualmente
+        env_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env")
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, _, v = line.partition("=")
+                        os.environ.setdefault(k.strip(), v.strip())
+    return os.environ.get(key, default)
 
 
 class AutoTradeController:
@@ -76,7 +98,6 @@ class AutoTradeController:
             return
         sig = consensus["signal"]
         strategy_name = "Consensus"
-        # FIX: usa o step de martingale correto acumulado
         step = self._martingale_steps.get(strategy_name, 0)
         stake = self.risk.get_stake(strategy_name, balance, step)
         duration, unit = self.get_duration_params()
@@ -95,21 +116,14 @@ class AutoTradeController:
         })
 
     def on_trade_result(self, strategy_name: str, is_win: bool, use_martingale: bool):
-        """
-        FIX: atualiza o step de martingale após cada resultado.
-        Chame este método a partir de _on_trade_closed no MainWindow.
-        """
         if use_martingale:
             if is_win:
-                # reset após ganho
                 self._martingale_steps[strategy_name] = 0
             else:
-                # incrementa step até o máximo configurado
                 current = self._martingale_steps.get(strategy_name, 0)
                 max_steps = self.risk.max_mart_steps
                 self._martingale_steps[strategy_name] = min(current + 1, max_steps)
         else:
-            # martingale desativado: sempre reseta
             self._martingale_steps[strategy_name] = 0
         self._last_result[strategy_name] = "win" if is_win else "loss"
 
@@ -123,7 +137,9 @@ class MainWindow(QMainWindow):
         self.resize(1600, 960)
         self.setStyleSheet(DARK_STYLE)
 
-        self.api = DerivAPI()
+        # FIX: lê App ID do .env — nunca usa 1089 hardcoded
+        app_id = _load_env_var("DERIV_APP_ID", "1089")
+        self.api = DerivAPI(app_id=app_id)
         self.risk = RiskManager()
         self.auto_ctrl = AutoTradeController(self.api, self.risk)
         self._balance = 0.0
@@ -196,8 +212,15 @@ class MainWindow(QMainWindow):
         self.txt_token.setPlaceholderText("API Token Deriv...")
         self.txt_token.setEchoMode(QLineEdit.Password)
         self.txt_token.setMaximumWidth(200)
+
+        # FIX: prioridade: 1) token salvo no DB, 2) DERIV_API_TOKEN do .env
         saved_token = get_setting("app_token")
-        if saved_token: self.txt_token.setText(saved_token)
+        if saved_token:
+            self.txt_token.setText(saved_token)
+        else:
+            env_token = _load_env_var("DERIV_API_TOKEN", "")
+            if env_token:
+                self.txt_token.setText(env_token)
         lay.addWidget(self.txt_token)
 
         self.btn_connect = QPushButton("🔗 Conectar")
@@ -370,7 +393,7 @@ class MainWindow(QMainWindow):
             return
         set_setting("app_token", token)
         self.api.start(token)
-        self.log("🔗 Conectando à Deriv...")
+        self.log(f"🔗 Conectando à Deriv (App ID: {self.api.app_id})...")
 
     def _disconnect(self):
         self.api.stop()
@@ -382,7 +405,6 @@ class MainWindow(QMainWindow):
             self.lbl_conn.setText("● CONECTADO")
             self.lbl_conn.setStyleSheet("color:#00c853; font-size:11px; font-weight:600;")
             self.tick_monitor.set_connected(True)
-            # FIX: NÃO chama subscribe_balance aqui — já é feito após authorize em deriv_api
             self._subscribe_current_symbol()
             self.log("✅ Conectado à Deriv WebSocket")
         else:
@@ -395,7 +417,6 @@ class MainWindow(QMainWindow):
         currency = acc.get("currency", "USD")
         self.lbl_balance.setText(f"Saldo: ${balance:.2f}")
         self.log(f"🔐 Autorizado: {acc.get('loginid','')} | {currency} | Saldo: ${balance:.2f}")
-        # FIX: removido subscribe_balance daqui — já feito automaticamente em _handle(authorize)
         self.api.get_history(self._current_symbol, count=200)
 
     def _on_balance(self, balance: float):
@@ -474,10 +495,6 @@ class MainWindow(QMainWindow):
 
     def _on_trade_closed(self, data: dict):
         cid = str(data.get("contract_id",""))
-
-        # FIX: calcula lucro real corretamente
-        # proposal_open_contract: usa campo 'profit' diretamente
-        # sell msg: lucro = sell_price - buy_price
         if "profit" in data:
             profit = float(data["profit"] or 0)
         else:
@@ -498,7 +515,6 @@ class MainWindow(QMainWindow):
         })
         update_strategy_perf("Consensus", is_win, profit)
 
-        # FIX: notifica o auto_ctrl para atualizar martingale steps
         use_martingale = self.chk_martingale.isChecked()
         self.auto_ctrl.on_trade_result("Consensus", is_win, use_martingale)
         if use_martingale and not is_win:
