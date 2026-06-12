@@ -62,7 +62,7 @@ class DerivAPI(QObject):
     connected_signal  = Signal(bool)
     portfolio_updated = Signal(list)
 
-    def __init__(self, app_id="36544"):
+    def __init__(self, app_id="1089"):
         super().__init__()
         self.app_id       = app_id
         self._ws          = None
@@ -110,6 +110,7 @@ class DerivAPI(QObject):
                 ) as ws:
                     self._ws = ws
                     self.connected_signal.emit(True)
+                    await asyncio.sleep(0.3)  # garante WS pronto antes de enviar token
                     if self._token:
                         await self._send_raw({
                             "authorize": self._token,
@@ -148,7 +149,10 @@ class DerivAPI(QObject):
 
     async def _handle(self, data: dict):
         if data.get("error"):
-            self.error_signal.emit(data["error"].get("message", str(data)))
+            code = data["error"].get("code", "")
+            msg = data["error"].get("message", str(data))
+            if code not in ("AlreadySubscribed",):
+                self.error_signal.emit(msg)
             return
 
         msg_type = data.get("msg_type")
