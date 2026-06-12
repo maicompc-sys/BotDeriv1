@@ -62,23 +62,19 @@ class DerivAPI(QObject):
     portfolio_updated = Signal(list)
     proposal_received = Signal(dict)
 
-    # FIX: app_id padrão é None — deve ser fornecido pelo .env via main_window.
-    # 1089 é o App ID genérico de testes da Deriv (pode ser bloqueado).
-    # Crie seu próprio em: https://developers.deriv.com/app-registration
+    # NOTA: O novo portal developers.deriv.com usa App ID no formato string
+    # alfanumérica (ex: "33wQj4vvambGV9iRyHOTh"), não mais inteiro.
+    # O app_id é passado como query param na URL do WebSocket.
     def __init__(self, app_id=None):
         super().__init__()
-        # FIX: app_id DEVE ser int para a API Deriv aceitar no JSON do WebSocket
+        # Aceita string ou int — mantém como string para compatibilidade
+        # com o novo formato do portal developers.deriv.com
         if app_id is None or str(app_id).strip() == "":
-            self.app_id = 1089  # fallback genérico
+            self.app_id = "1089"  # fallback genérico legado
             self._using_generic_id = True
         else:
-            try:
-                self.app_id = int(app_id)
-            except (ValueError, TypeError):
-                self.app_id = 1089
-                self._using_generic_id = True
-            else:
-                self._using_generic_id = (self.app_id == 1089)
+            self.app_id = str(app_id).strip()
+            self._using_generic_id = (self.app_id == "1089")
 
         self._ws          = None
         self._loop        = None
@@ -100,7 +96,6 @@ class DerivAPI(QObject):
         self._token = token
         if self._thread and self._thread.is_alive():
             return
-        # Aviso se usando App ID genérico
         if self._using_generic_id:
             self.error_signal.emit(
                 "AVISO: usando App ID genérico (1089). "
@@ -121,7 +116,6 @@ class DerivAPI(QObject):
         self._loop.run_until_complete(self._connect())
 
     async def _connect(self):
-        # FIX: app_id é int no JSON — a URL o recebe como query param (string na URL está ok)
         url = f"{WS_URL}?app_id={self.app_id}"
         while self._running:
             try:
@@ -247,7 +241,7 @@ class DerivAPI(QObject):
             self.portfolio_updated.emit(
                 data.get("portfolio", {}).get("contracts", []))
 
-    # ── Public API ────────────────────────────────────────────────────────
+    # ── Public API ──────────────────────────────────────────────────────
     def subscribe_ticks(self, symbol: str):
         self.send({"ticks": symbol, "subscribe": 1, "req_id": self._next_id()})
 
@@ -271,12 +265,6 @@ class DerivAPI(QObject):
     def buy_direct(self, symbol: str, contract_type: str,
                    duration: int, duration_unit: str,
                    stake: float, barrier: str = None):
-        """
-        Fluxo correto Deriv API:
-        1) Envia 'proposal' para obter cotação e ID
-        2) Ao receber resposta, executa 'buy' com o proposal ID
-        Documentação: https://developers.deriv.com/docs/account/buy/
-        """
         req_id = self._next_id()
         params = {
             "amount":        stake,
