@@ -6,6 +6,8 @@ from datetime import datetime
 from collections import deque
 from PySide6.QtCore import QObject, Signal
 
+# Endpoint oficial Deriv WebSocket (atualizado 2025/2026)
+# Documentação: https://developers.deriv.com
 WS_URL = "wss://ws.derivws.com/websockets/v3"
 
 GRANULARITIES = {
@@ -58,22 +60,36 @@ class DerivAPI(QObject):
     error_signal      = Signal(str)
     connected_signal  = Signal(bool)
     portfolio_updated = Signal(list)
-    proposal_received = Signal(dict)  # novo: recebe proposta antes do buy
+    proposal_received = Signal(dict)
 
-    def __init__(self, app_id="1089"):
+    # FIX: app_id padrão é None — deve ser fornecido pelo .env via main_window.
+    # 1089 é o App ID genérico de testes da Deriv (pode ser bloqueado).
+    # Crie seu próprio em: https://developers.deriv.com/app-registration
+    def __init__(self, app_id=None):
         super().__init__()
-        self.app_id       = app_id
+        # FIX: app_id DEVE ser int para a API Deriv aceitar no JSON do WebSocket
+        if app_id is None or str(app_id).strip() == "":
+            self.app_id = 1089  # fallback genérico
+            self._using_generic_id = True
+        else:
+            try:
+                self.app_id = int(app_id)
+            except (ValueError, TypeError):
+                self.app_id = 1089
+                self._using_generic_id = True
+            else:
+                self._using_generic_id = (self.app_id == 1089)
+
         self._ws          = None
         self._loop        = None
         self._thread      = None
         self._running     = False
         self._token       = ""
-        self._req_id      = 0  # FIX: começa em 0 para retornar 1 na primeira chamada
+        self._req_id      = 0
         self._prices      = {}
         self.balance      = 0.0
         self.currency     = "USD"
         self.account_info = {}
-        # FIX: armazena propostas pendentes aguardando buy {req_id: params}
         self._pending_proposals = {}
 
     def _next_id(self):
@@ -84,6 +100,12 @@ class DerivAPI(QObject):
         self._token = token
         if self._thread and self._thread.is_alive():
             return
+        # Aviso se usando App ID genérico
+        if self._using_generic_id:
+            self.error_signal.emit(
+                "AVISO: usando App ID genérico (1089). "
+                "Crie o seu em developers.deriv.com para evitar bloqueios."
+            )
         self._running = True
         self._thread  = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
@@ -99,6 +121,7 @@ class DerivAPI(QObject):
         self._loop.run_until_complete(self._connect())
 
     async def _connect(self):
+        # FIX: app_id é int no JSON — a URL o recebe como query param (string na URL está ok)
         url = f"{WS_URL}?app_id={self.app_id}"
         while self._running:
             try:
@@ -153,7 +176,6 @@ class DerivAPI(QObject):
             msg = data["error"].get("message", str(data))
             if code not in ("AlreadySubscribed",):
                 self.error_signal.emit(msg)
-            # FIX: limpa proposta pendente em caso de erro
             req_id = data.get("req_id")
             if req_id and req_id in self._pending_proposals:
                 del self._pending_proposals[req_id]
@@ -168,7 +190,6 @@ class DerivAPI(QObject):
             self.account_info = acc
             self.authorized.emit(acc)
             self.balance_updated.emit(self.balance)
-            # FIX: subscribe_balance apenas aqui, não duplicar em _on_authorized
             await self._send_raw({"balance": 1, "subscribe": 1, "req_id": self._next_id()})
 
         elif msg_type == "balance":
@@ -200,7 +221,6 @@ class DerivAPI(QObject):
                     self._prices[symbol].append(float(p))
 
         elif msg_type == "proposal":
-            # FIX: ao receber proposta, executa o buy com o id correto
             proposal = data.get("proposal", {})
             req_id   = data.get("req_id")
             if req_id and req_id in self._pending_proposals:
@@ -236,8 +256,6 @@ class DerivAPI(QObject):
         self.send({"forget_all": "candles", "req_id": self._next_id()})
 
     def subscribe_balance(self):
-        # FIX: mantido para uso externo mas o subscribe inicial é feito
-        # automaticamente após authorize para evitar duplicação
         self.send({"balance": 1, "subscribe": 1, "req_id": self._next_id()})
 
     def get_history(self, symbol: str, count: int = 200):
@@ -254,8 +272,10 @@ class DerivAPI(QObject):
                    duration: int, duration_unit: str,
                    stake: float, barrier: str = None):
         """
-        FIX: fluxo correto Deriv API — envia 'proposal' primeiro,
-        ao receber a resposta executa 'buy' com o proposal id.
+        Fluxo correto Deriv API:
+        1) Envia 'proposal' para obter cotação e ID
+        2) Ao receber resposta, executa 'buy' com o proposal ID
+        Documentação: https://developers.deriv.com/docs/account/buy/
         """
         req_id = self._next_id()
         params = {
@@ -269,7 +289,6 @@ class DerivAPI(QObject):
         }
         if barrier is not None:
             params["barrier"] = barrier
-        # armazena para uso quando a proposta retornar
         self._pending_proposals[req_id] = {"stake": stake, "params": params}
         self.send({
             "proposal":   1,
