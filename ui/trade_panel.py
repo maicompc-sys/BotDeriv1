@@ -11,6 +11,20 @@ from bot.database import get_trades, get_strategy_stats
 from bot.deriv_api import SYNTHETIC_SYMBOLS, GRANULARITIES, TICK_SIZES
 from datetime import datetime
 
+
+def _safe_float(val, default=0.0) -> float:
+    """Converte valor do DB para float com segurança (None → default)."""
+    try:
+        return float(val) if val is not None else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_str(val, default="─") -> str:
+    """Converte valor do DB para string com segurança (None → default)."""
+    return str(val) if val is not None else default
+
+
 class TradeHistoryTable(QTableWidget):
     def __init__(self):
         super().__init__()
@@ -27,27 +41,28 @@ class TradeHistoryTable(QTableWidget):
     def load_trades(self, trades: list):
         self.setRowCount(len(trades))
         for r, t in enumerate(trades):
-            profit = t.get("profit", 0) or 0
-            result = t.get("result", "─")
+            # FIX: todos os campos numéricos protegidos contra None/NULL do DB
+            profit  = _safe_float(t.get("profit"))
+            stake   = _safe_float(t.get("stake"))
+            payout  = _safe_float(t.get("payout"))
+            result  = _safe_str(t.get("result"), "─")
             color = QColor("#00c853") if result == "win" else QColor("#ff1744") if result == "loss" else QColor("#8b99b4")
             vals = [
-                str(t.get("id","─")),
-                t.get("symbol","─"),
-                t.get("strategy","─"),
-                t.get("contract_type","─"),
-                f"${t.get('stake',0):.2f}",
-                f"${t.get('payout',0):.2f}",
+                _safe_str(t.get("id")),
+                _safe_str(t.get("symbol")),
+                _safe_str(t.get("strategy")),
+                _safe_str(t.get("contract_type")),
+                f"${stake:.2f}",
+                f"${payout:.2f}",
                 f"${profit:+.2f}",
-                (result or "─").upper(),
-                (t.get("entry_time","─") or "─")[:19],
-                str(t.get("duration","─")),
+                result.upper(),
+                _safe_str(t.get("entry_time"), "─")[:19],
+                _safe_str(t.get("duration")),
             ]
             for c, val in enumerate(vals):
                 item = QTableWidgetItem(val)
                 item.setTextAlignment(Qt.AlignCenter)
-                if c == 6:
-                    item.setForeground(color)
-                if c == 7:
+                if c in (6, 7):
                     item.setForeground(color)
                 self.setItem(r, c, item)
 
@@ -68,12 +83,12 @@ class OpenTradesTable(QTableWidget):
         self.setRowCount(len(contracts))
         for r, c in enumerate(contracts):
             vals = [
-                str(c.get("contract_id","─")),
-                c.get("underlying","─"),
-                c.get("contract_type","─"),
-                f"${c.get('buy_price',0):.2f}",
-                str(c.get("date_expiry","─")),
-                c.get("status","─"),
+                _safe_str(c.get("contract_id")),
+                _safe_str(c.get("underlying")),
+                _safe_str(c.get("contract_type")),
+                f"${_safe_float(c.get('buy_price')):.2f}",
+                _safe_str(c.get("date_expiry")),
+                _safe_str(c.get("status")),
             ]
             for ci, val in enumerate(vals):
                 item = QTableWidgetItem(val)
@@ -97,7 +112,7 @@ class StatsWidget(QWidget):
             frame = QFrame()
             frame.setStyleSheet("QFrame{background:#111520;border:1px solid #1e2d40;border-radius:4px;}")
             fl = QVBoxLayout(frame)
-            fl.setContentsMargins(8,6,8,6)
+            fl.setContentsMargins(8, 6, 8, 6)
             lbl = QLabel(label)
             lbl.setStyleSheet("color:#4a6080; font-size:10px; font-weight:600; letter-spacing:0.3px;")
             val = QLabel("─")
@@ -111,18 +126,18 @@ class StatsWidget(QWidget):
         if not trades:
             return
         closed = [t for t in trades if t.get("status") == "closed" or t.get("result")]
-        wins = [t for t in closed if t.get("result") == "win"]
+        wins   = [t for t in closed if t.get("result") == "win"]
         losses = [t for t in closed if t.get("result") == "loss"]
-        total_profit = sum(t.get("profit", 0) or 0 for t in closed)
-        win_rate = len(wins) / len(closed) if closed else 0
+        total_profit = sum(_safe_float(t.get("profit")) for t in closed)
+        win_rate  = len(wins) / len(closed) if closed else 0
         avg_profit = total_profit / len(closed) if closed else 0
         today = datetime.now().date().isoformat()
-        today_trades = [t for t in closed if (t.get("entry_time","") or "").startswith(today)]
-        daily_pnl = sum(t.get("profit",0) or 0 for t in today_trades)
+        today_trades = [t for t in closed if (_safe_str(t.get("entry_time"), "")).startswith(today)]
+        daily_pnl = sum(_safe_float(t.get("profit")) for t in today_trades)
         stats_db = get_strategy_stats()
-        best = max(stats_db, key=lambda x: x.get("win_rate",0)) if stats_db else None
-        wr_color = "#00c853" if win_rate >= 0.7 else "#ffd700" if win_rate >= 0.5 else "#ff1744"
-        pnl_color = "#00c853" if total_profit >= 0 else "#ff1744"
+        best = max(stats_db, key=lambda x: x.get("win_rate", 0)) if stats_db else None
+        wr_color   = "#00c853" if win_rate >= 0.7 else "#ffd700" if win_rate >= 0.5 else "#ff1744"
+        pnl_color  = "#00c853" if total_profit >= 0 else "#ff1744"
         dpnl_color = "#00c853" if daily_pnl >= 0 else "#ff1744"
         self._vals["total_trades"].setText(str(len(closed)))
         self._vals["wins"].setText(str(len(wins)))
@@ -207,7 +222,6 @@ class TradePanel(QWidget):
         ml.addWidget(ctrl)
         ml.addLayout(btn_row)
 
-        # Stats widget
         self.stats_widget = StatsWidget()
         ml.addWidget(self.stats_widget)
         ml.addStretch()
@@ -244,9 +258,12 @@ class TradePanel(QWidget):
         )
 
     def refresh_trades(self):
-        trades = get_trades(limit=100)
-        self.trade_table.load_trades(trades)
-        self.stats_widget.update_stats(trades)
+        try:
+            trades = get_trades(limit=100)
+            self.trade_table.load_trades(trades)
+            self.stats_widget.update_stats(trades)
+        except Exception as e:
+            pass  # Silencia erros de refresh para não travar a UI
 
     def update_open_contracts(self, contracts: list):
         self.open_table.update_contracts(contracts)
