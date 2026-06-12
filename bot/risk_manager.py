@@ -14,9 +14,11 @@ class RiskManager:
         self.kelly_fraction   = float(get_setting("kelly_fraction",      "0.25"))
 
     def kelly_stake(self, win_rate, avg_win, avg_loss, balance):
-        if avg_loss == 0 or win_rate <= 0:
+        # FIX: protege contra avg_win=0 que causava ZeroDivisionError
+        if avg_loss == 0 or avg_win == 0 or win_rate <= 0:
             return self.default_stake
         b     = avg_win / avg_loss
+        # b garantidamente > 0 aqui
         kelly = max(0, (b * win_rate - (1 - win_rate)) / b) * self.kelly_fraction
         return round(min(max(balance * kelly, self.default_stake), self.max_stake), 2)
 

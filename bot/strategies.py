@@ -8,12 +8,14 @@ class StrategyBase:
         return {"signal": None, "confidence": 0, "reason": "No signal"}
 
 def ema(data, period):
-    if len(data) < period: return np.array(data)
-    result    = np.zeros(len(data))
-    k         = 2 / (period + 1)
-    result[period-1] = np.mean(data[:period])
+    """FIX: usa NaN nos índices inválidos em vez de zeros espúrios"""
+    if len(data) < period:
+        return np.full(len(data), np.nan)
+    result = np.full(len(data), np.nan)
+    k = 2 / (period + 1)
+    result[period - 1] = np.mean(data[:period])
     for i in range(period, len(data)):
-        result[i] = data[i] * k + result[i-1] * (1 - k)
+        result[i] = data[i] * k + result[i - 1] * (1 - k)
     return result
 
 def rsi(data, period=14):
@@ -34,27 +36,31 @@ def bollinger(data, period=20, std_dev=2):
     return mid - std_dev * std, mid, mid + std_dev * std
 
 def macd(data, fast=12, slow=26, signal=9):
+    """FIX: usa apenas valores válidos (sem NaNs do ema corrigido)"""
     if len(data) < slow + signal: return 0, 0
-    ef   = ema(data, fast)
-    es   = ema(data, slow)
-    ml   = ef - es
-    valid = ml[slow-1:]
+    ef = ema(data, fast)
+    es = ema(data, slow)
+    # ambos têm NaN antes do período — opera só onde ambos são válidos
+    ml = np.where(np.isnan(ef) | np.isnan(es), np.nan, ef - es)
+    valid = ml[~np.isnan(ml)]
     if len(valid) < signal: return 0, 0
-    sl   = ema(list(valid), signal)
-    return ml[-1], sl[-1]
+    sl = ema(list(valid), signal)
+    # sl também pode ter NaN nos primeiros valores
+    sl_valid = sl[~np.isnan(sl)]
+    if len(sl_valid) == 0: return 0, 0
+    return valid[-1], sl_valid[-1]
 
 def stochastic(data, period=14):
+    """FIX: calcula k_arr corretamente sobre o array completo de data"""
     if len(data) < period: return 50, 50
-    window = data[-period:]
-    lo, hi = min(window), max(window)
-    if hi == lo: return 50, 50
     k_arr = []
-    for i in range(period, len(data)+1):
-        w = data[i-period:i]
+    for i in range(period, len(data) + 1):
+        w = data[i - period:i]
         lo2, hi2 = min(w), max(w)
-        k_arr.append(50 if hi2==lo2 else (data[i-1]-lo2)/(hi2-lo2)*100)
+        k_arr.append(50.0 if hi2 == lo2 else (data[i - 1] - lo2) / (hi2 - lo2) * 100)
+    if not k_arr: return 50, 50
     k = k_arr[-1]
-    d = np.mean(k_arr[-3:]) if len(k_arr) >= 3 else k
+    d = float(np.mean(k_arr[-3:])) if len(k_arr) >= 3 else k
     return k, d
 
 def atr(data, period=14):
@@ -192,19 +198,25 @@ class EMATripleCrossStrategy(StrategyBase):
     def analyze(self, prices, ticks=None):
         if len(prices) < self.min_ticks:
             return {"signal": None, "confidence": 0, "reason": "Dados insuficientes"}
-        e5      = ema(prices, 5)[-1]
-        e13     = ema(prices, 13)[-1]
-        e34     = ema(prices, 34)[-1]
-        e5_prev = ema(prices[:-1], 5)[-1]
-        e13_prev= ema(prices[:-1], 13)[-1]
+        e5_arr      = ema(prices, 5)
+        e13_arr     = ema(prices, 13)
+        e34_arr     = ema(prices, 34)
+        e5_prev_arr = ema(prices[:-1], 5)
+        e13_prev_arr= ema(prices[:-1], 13)
+        # FIX: verifica NaN antes de comparar
+        e5  = e5_arr[-1];  e13 = e13_arr[-1];  e34 = e34_arr[-1]
+        e5_prev  = e5_prev_arr[-1]
+        e13_prev = e13_prev_arr[-1]
+        if any(np.isnan(v) for v in [e5, e13, e34, e5_prev, e13_prev]):
+            return {"signal": None, "confidence": 0, "reason": "EMA insuficiente"}
         if e5 > e13 > e34 and e5 > e5_prev:
             conf = min(85, 72 + (e5 - e34) / max(e34, 1e-9) * 5000)
             return {"signal": "CALL", "confidence": round(conf, 1),
-                    "reason": f"EMA5>EMA13>EMA34 Bull align"}
+                    "reason": "EMA5>EMA13>EMA34 Bull align"}
         elif e5 < e13 < e34 and e5 < e5_prev:
             conf = min(85, 72 + (e34 - e5) / max(e34, 1e-9) * 5000)
             return {"signal": "PUT", "confidence": round(conf, 1),
-                    "reason": f"EMA5<EMA13<EMA34 Bear align"}
+                    "reason": "EMA5<EMA13<EMA34 Bear align"}
         if e5 > e13 and e5_prev <= e13_prev:
             return {"signal": "CALL", "confidence": 79, "reason": "Golden Cross EMA5/13"}
         elif e5 < e13 and e5_prev >= e13_prev:
@@ -223,8 +235,8 @@ class StochMACDStrategy(StrategyBase):
         bull   = 0; bear = 0; reasons = []
         if k < 25 and d < 30: bull += 1; reasons.append(f"Stoch SB K={k:.0f}")
         if k > 75 and d > 70: bear += 1; reasons.append(f"Stoch SC K={k:.0f}")
-        if mc > ms and mc > 0: bull += 1; reasons.append(f"MACD bull")
-        if mc < ms and mc < 0: bear += 1; reasons.append(f"MACD bear")
+        if mc > ms and mc > 0: bull += 1; reasons.append("MACD bull")
+        if mc < ms and mc < 0: bear += 1; reasons.append("MACD bear")
         if bull >= 2:
             return {"signal": "CALL", "confidence": 82, "reason": " + ".join(reasons)}
         if bear >= 2:

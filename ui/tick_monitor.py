@@ -3,10 +3,11 @@ Monitor de Ticks Central - Componente Principal da UI
 Exibe preço ao vivo, histórico de ticks, mini chart
 """
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
-    QFrame, QGridLayout, QSizePolicy)
+    QFrame, QGridLayout, QSizePolicy, QProgressBar)
 from PySide6.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, Property, QRect
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QLinearGradient, QBrush, QPainterPath
 from collections import deque
+import numpy as np  # FIX: movido para topo — era importado a cada tick
 import time
 
 class SparklineWidget(QWidget):
@@ -40,20 +41,17 @@ class SparklineWidget(QWidget):
         def px(i): return pad + (i / (len(prices)-1)) * (w - 2*pad)
         def py(p): return pad + (1 - (p - mn) / rng) * (h - 2*pad)
 
-        # Background gradient
         bg = QLinearGradient(0, 0, 0, h)
         bg.setColorAt(0, QColor("#0a0c12"))
         bg.setColorAt(1, QColor("#080a10"))
         painter.fillRect(0, 0, w, h, bg)
 
-        # Grid lines
         pen = QPen(QColor("#1e2d40"), 1, Qt.DotLine)
         painter.setPen(pen)
         for i in range(1, 4):
             y = h * i // 4
             painter.drawLine(0, y, w, y)
 
-        # Fill area under line
         if self.signal == "CALL":
             fill_color = QColor(0, 200, 83, 30)
             line_color = QColor("#00c853")
@@ -73,13 +71,11 @@ class SparklineWidget(QWidget):
         path.closeSubpath()
         painter.fillPath(path, fill_color)
 
-        # Main line
         pen = QPen(line_color, 2)
         painter.setPen(pen)
         for i in range(1, len(prices)):
             painter.drawLine(int(px(i-1)), int(py(prices[i-1])), int(px(i)), int(py(prices[i])))
 
-        # Last price dot
         last_x, last_y = int(px(len(prices)-1)), int(py(prices[-1]))
         painter.setBrush(line_color)
         painter.setPen(Qt.NoPen)
@@ -134,7 +130,6 @@ class TickMonitorWidget(QFrame):
         layout.setContentsMargins(12, 10, 12, 10)
         layout.setSpacing(6)
 
-        # Header row
         hdr = QHBoxLayout()
         self.lbl_symbol = QLabel("─ Selecione um símbolo ─")
         self.lbl_symbol.setStyleSheet("color:#8b99b4; font-size:12px; font-weight:600; letter-spacing:1px;")
@@ -145,7 +140,6 @@ class TickMonitorWidget(QFrame):
         hdr.addWidget(self.lbl_status)
         layout.addLayout(hdr)
 
-        # Price display
         price_row = QHBoxLayout()
         self.lbl_price = QLabel("─────")
         self.lbl_price.setObjectName("label_price")
@@ -161,7 +155,6 @@ class TickMonitorWidget(QFrame):
         price_row.addStretch()
         layout.addLayout(price_row)
 
-        # Stats row
         stats = QGridLayout()
         stats.setSpacing(8)
         self._stat_labels = {}
@@ -180,15 +173,12 @@ class TickMonitorWidget(QFrame):
             stats.addWidget(val_lbl, 1, i)
         layout.addLayout(stats)
 
-        # Sparkline chart
         self.sparkline = SparklineWidget()
         layout.addWidget(self.sparkline, stretch=3)
 
-        # Tick bars
         self.tick_bars = TickBarWidget()
         layout.addWidget(self.tick_bars)
 
-        # Signal indicator
         sig_row = QHBoxLayout()
         self.lbl_signal = QLabel("Aguardando sinal...")
         self.lbl_signal.setStyleSheet("color:#4a6080; font-size:11px; font-style:italic;")
@@ -196,13 +186,11 @@ class TickMonitorWidget(QFrame):
         sig_row.addWidget(self.lbl_signal)
         layout.addLayout(sig_row)
 
-        # Confidence bar row
         conf_row = QHBoxLayout()
         self.lbl_conf_call = QLabel("CALL")
         self.lbl_conf_call.setStyleSheet("color:#00c853; font-size:10px; font-weight:700; min-width:35px;")
         self.lbl_conf_put = QLabel("PUT")
         self.lbl_conf_put.setStyleSheet("color:#ff1744; font-size:10px; font-weight:700; min-width:35px; qproperty-alignment:AlignRight;")
-        from PySide6.QtWidgets import QProgressBar
         self.bar_call = QProgressBar()
         self.bar_call.setObjectName("bar_call")
         self.bar_call.setRange(0, 100)
@@ -229,7 +217,6 @@ class TickMonitorWidget(QFrame):
         if len(self.prices) < 2:
             return
 
-        # Arrow & color
         if price > self.prev_price:
             arrow, color = "▲", "#00c853"
         elif price < self.prev_price:
@@ -246,12 +233,11 @@ class TickMonitorWidget(QFrame):
         self.lbl_change.setText(chg_txt)
         self.lbl_change.setStyleSheet(f"color:{color}; font-size:13px; font-weight:600;")
 
-        # Stats
         prices_list = list(self.prices)
         if prices_list:
             hi = max(prices_list[-50:]) if len(prices_list) >= 50 else max(prices_list)
             lo = min(prices_list[-50:]) if len(prices_list) >= 50 else min(prices_list)
-            import numpy as np
+            # FIX: np já importado no topo do arquivo
             vol = np.std(prices_list[-20:]) if len(prices_list) >= 20 else 0
             trend = "ALTA ▲" if prices_list[-1] > np.mean(prices_list[-10:]) else "BAIXA ▼"
             trend_color = "#00c853" if "ALTA" in trend else "#ff1744"

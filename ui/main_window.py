@@ -36,9 +36,9 @@ class AutoTradeController:
         self.enabled_strategies = [s.name for s in ALL_STRATEGIES]
         self.last_trade_time = 0
         self.cooldown = 15
-        self._martingale_steps = {}
+        self._martingale_steps = {}   # strategy_name -> int
         self._pending_buys = {}
-        self._last_result = {}
+        self._last_result = {}        # strategy_name -> "win" | "loss"
 
     def should_trade(self, consensus: dict) -> bool:
         import time
@@ -46,13 +46,11 @@ class AutoTradeController:
             return False
         if not consensus.get("signal"):
             return False
-            
         votes_call = consensus.get("votes_call", 0)
         votes_put  = consensus.get("votes_put", 0)
         total_votes = votes_call + votes_put
         if total_votes < 2:
             return False
-
         if consensus.get("confidence", 0) < self.min_confidence:
             return False
         at_limit, _ = self.risk.check_daily_limit()
@@ -78,12 +76,14 @@ class AutoTradeController:
             return
         sig = consensus["signal"]
         strategy_name = "Consensus"
+        # FIX: usa o step de martingale correto acumulado
         step = self._martingale_steps.get(strategy_name, 0)
         stake = self.risk.get_stake(strategy_name, balance, step)
         duration, unit = self.get_duration_params()
         contract_type = sig
         if log_fn:
-            log_fn(f"🤖 AUTO: {sig} | {self.symbol} | Stake=${stake} | Dur={duration}{unit} | Conf={consensus['confidence']:.0f}%")
+            mart_info = f" | Mart step={step}" if step > 0 else ""
+            log_fn(f"🤖 AUTO: {sig} | {self.symbol} | Stake=${stake} | Dur={duration}{unit} | Conf={consensus['confidence']:.0f}%{mart_info}")
         self.api.buy_direct(self.symbol, contract_type, duration, unit, stake)
         self.last_trade_time = time.time()
         entry_time = datetime.now().isoformat()
@@ -93,6 +93,25 @@ class AutoTradeController:
             "stake": stake, "entry_time": entry_time, "status": "open",
             "tick_count": duration if unit == "t" else 0,
         })
+
+    def on_trade_result(self, strategy_name: str, is_win: bool, use_martingale: bool):
+        """
+        FIX: atualiza o step de martingale após cada resultado.
+        Chame este método a partir de _on_trade_closed no MainWindow.
+        """
+        if use_martingale:
+            if is_win:
+                # reset após ganho
+                self._martingale_steps[strategy_name] = 0
+            else:
+                # incrementa step até o máximo configurado
+                current = self._martingale_steps.get(strategy_name, 0)
+                max_steps = self.risk.max_mart_steps
+                self._martingale_steps[strategy_name] = min(current + 1, max_steps)
+        else:
+            # martingale desativado: sempre reseta
+            self._martingale_steps[strategy_name] = 0
+        self._last_result[strategy_name] = "win" if is_win else "loss"
 
 
 class MainWindow(QMainWindow):
@@ -129,37 +148,30 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(6, 6, 6, 6)
         root.setSpacing(4)
 
-        # ── TOP BAR ─────────────────────────────────────────────────────
         topbar = self._build_topbar()
         root.addLayout(topbar)
 
-        # ── MAIN AREA: splitter ──────────────────────────────────────────
         splitter = QSplitter(Qt.Horizontal)
         splitter.setHandleWidth(4)
 
-        # LEFT PANEL — Controls
         left = self._build_left_panel()
         splitter.addWidget(left)
 
-        # CENTER — Tick Monitor
         self.tick_monitor = TickMonitorWidget()
         splitter.addWidget(self.tick_monitor)
 
-        # RIGHT — Strategy + Trade
         right = self._build_right_panel()
         splitter.addWidget(right)
 
         splitter.setSizes([280, 520, 380])
         root.addWidget(splitter, stretch=1)
 
-        # ── BOTTOM BAR ───────────────────────────────────────────────────
         self._build_statusbar()
 
     def _build_topbar(self):
         lay = QHBoxLayout()
         lay.setSpacing(10)
 
-        # Logo / Title
         lbl_logo = QLabel("⚡ DERIV BOT")
         lbl_logo.setStyleSheet("color:#00d4ff; font-size:18px; font-weight:900; letter-spacing:2px;")
         lay.addWidget(lbl_logo)
@@ -167,7 +179,6 @@ class MainWindow(QMainWindow):
         sep = QFrame(); sep.setFrameShape(QFrame.VLine)
         sep.setStyleSheet("color:#1e2d40;"); lay.addWidget(sep)
 
-        # Balance
         self.lbl_balance = QLabel("Saldo: $─")
         self.lbl_balance.setObjectName("label_balance")
         lay.addWidget(self.lbl_balance)
@@ -175,14 +186,12 @@ class MainWindow(QMainWindow):
         sep2 = QFrame(); sep2.setFrameShape(QFrame.VLine)
         sep2.setStyleSheet("color:#1e2d40;"); lay.addWidget(sep2)
 
-        # Connection
         self.lbl_conn = QLabel("● DESCONECTADO")
         self.lbl_conn.setStyleSheet("color:#ff1744; font-size:11px; font-weight:600;")
         lay.addWidget(self.lbl_conn)
 
         lay.addStretch()
 
-        # Token input
         self.txt_token = QLineEdit()
         self.txt_token.setPlaceholderText("API Token Deriv...")
         self.txt_token.setEchoMode(QLineEdit.Password)
@@ -199,7 +208,6 @@ class MainWindow(QMainWindow):
         self.btn_disconnect.clicked.connect(self._disconnect)
         lay.addWidget(self.btn_disconnect)
 
-        # Clock
         self.lbl_time = QLabel()
         self.lbl_time.setStyleSheet("color:#4a6080; font-size:11px; font-family:Consolas;")
         t = QTimer(self)
@@ -216,7 +224,6 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        # Symbol selection
         sym_grp = QGroupBox("SÍMBOLO")
         sl = QVBoxLayout(sym_grp)
         self.cmb_symbol = QComboBox()
@@ -226,7 +233,6 @@ class MainWindow(QMainWindow):
         sl.addWidget(self.cmb_symbol)
         layout.addWidget(sym_grp)
 
-        # Granularity
         gran_grp = QGroupBox("GRANULARIDADE")
         gl = QVBoxLayout(gran_grp)
         self.cmb_gran = QComboBox()
@@ -235,7 +241,6 @@ class MainWindow(QMainWindow):
         gl.addWidget(self.cmb_gran)
         layout.addWidget(gran_grp)
 
-        # Auto trade controls
         auto_grp = QGroupBox("BOT AUTOMÁTICO")
         al = QGridLayout(auto_grp)
         al.setSpacing(6)
@@ -289,7 +294,6 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(auto_grp)
 
-        # Start/Stop buttons
         btn_row = QHBoxLayout()
         self.btn_start = QPushButton("▶ INICIAR BOT")
         self.btn_start.setObjectName("btn_start")
@@ -303,12 +307,10 @@ class MainWindow(QMainWindow):
         btn_row.addWidget(self.btn_stop)
         layout.addLayout(btn_row)
 
-        # Save settings
         btn_save = QPushButton("💾 Salvar Configurações")
         btn_save.clicked.connect(self._save_settings)
         layout.addWidget(btn_save)
 
-        # Log
         log_grp = QGroupBox("LOG DO SISTEMA")
         ll = QVBoxLayout(log_grp)
         self.txt_log = QTextEdit()
@@ -380,7 +382,7 @@ class MainWindow(QMainWindow):
             self.lbl_conn.setText("● CONECTADO")
             self.lbl_conn.setStyleSheet("color:#00c853; font-size:11px; font-weight:600;")
             self.tick_monitor.set_connected(True)
-            self.api.subscribe_balance()
+            # FIX: NÃO chama subscribe_balance aqui — já é feito após authorize em deriv_api
             self._subscribe_current_symbol()
             self.log("✅ Conectado à Deriv WebSocket")
         else:
@@ -393,7 +395,7 @@ class MainWindow(QMainWindow):
         currency = acc.get("currency", "USD")
         self.lbl_balance.setText(f"Saldo: ${balance:.2f}")
         self.log(f"🔐 Autorizado: {acc.get('loginid','')} | {currency} | Saldo: ${balance:.2f}")
-        self.api.subscribe_balance()
+        # FIX: removido subscribe_balance daqui — já feito automaticamente em _handle(authorize)
         self.api.get_history(self._current_symbol, count=200)
 
     def _on_balance(self, balance: float):
@@ -467,19 +469,42 @@ class MainWindow(QMainWindow):
 
     def _on_trade_opened(self, buy: dict):
         cid = buy.get("contract_id","")
-        price = buy.get("buy_price",0)
+        price = buy.get("buy_price", 0)
         self.log(f"✅ TRADE ABERTO #{cid} | Pago: ${price:.2f}")
 
     def _on_trade_closed(self, data: dict):
         cid = str(data.get("contract_id",""))
-        profit = data.get("profit", data.get("sell_price",0))
-        is_win = float(profit or 0) > 0
+
+        # FIX: calcula lucro real corretamente
+        # proposal_open_contract: usa campo 'profit' diretamente
+        # sell msg: lucro = sell_price - buy_price
+        if "profit" in data:
+            profit = float(data["profit"] or 0)
+        else:
+            sell_price = float(data.get("sell_price", 0) or 0)
+            buy_price  = float(data.get("buy_price", 0) or 0)
+            profit = sell_price - buy_price
+
+        is_win = profit > 0
         result_str = "win" if is_win else "loss"
         icon = "🟢" if is_win else "🔴"
-        self.log(f"{icon} TRADE FECHADO #{cid} | Lucro: ${float(profit or 0):.2f} | {result_str.upper()}")
-        update_trade(cid, {"result": result_str, "profit": float(profit or 0),
-            "status": "closed", "exit_time": datetime.now().isoformat()})
-        update_strategy_perf("Consensus", is_win, float(profit or 0))
+        self.log(f"{icon} TRADE FECHADO #{cid} | Lucro: ${profit:.2f} | {result_str.upper()}")
+
+        update_trade(cid, {
+            "result": result_str,
+            "profit": profit,
+            "status": "closed",
+            "exit_time": datetime.now().isoformat()
+        })
+        update_strategy_perf("Consensus", is_win, profit)
+
+        # FIX: notifica o auto_ctrl para atualizar martingale steps
+        use_martingale = self.chk_martingale.isChecked()
+        self.auto_ctrl.on_trade_result("Consensus", is_win, use_martingale)
+        if use_martingale and not is_win:
+            step = self.auto_ctrl._martingale_steps.get("Consensus", 0)
+            self.log(f"📈 Martingale step={step} | próximo stake=${self.risk.get_stake('Consensus', self._balance, step):.2f}")
+
         self.strategy_panel.refresh_winrates()
         self.trade_panel.refresh_trades()
 
