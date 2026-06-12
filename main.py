@@ -1,54 +1,57 @@
-#!/usr/bin/env python3
-import sys
+"""
+main.py — Entry point do BotDeriv1
+Autentica automaticamente e permite escolher modo DEMO ou REAL.
+"""
+
+import asyncio
+import logging
 import os
+from dotenv import load_dotenv
+from bot.deriv_api import DerivClient
 
-sys.path.insert(0, os.path.dirname(__file__))
+load_dotenv()
 
-from PySide6.QtWidgets import QApplication, QSplashScreen
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QFont, QPixmap, QColor, QPainter, QLinearGradient
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
 
-def create_splash():
-    pm = QPixmap(600, 300)
-    painter = QPainter(pm)
-    grad = QLinearGradient(0, 0, 600, 300)
-    grad.setColorAt(0, QColor("#0d0f14"))
-    grad.setColorAt(1, QColor("#111520"))
-    painter.fillRect(0, 0, 600, 300, grad)
-    painter.setPen(QColor("#00d4ff"))
-    font = QFont("Segoe UI", 28, QFont.Bold)
-    painter.setFont(font)
-    painter.drawText(0, 0, 600, 180, Qt.AlignCenter, "⚡ DERIV BOT")
-    painter.setPen(QColor("#8b99b4"))
-    font2 = QFont("Segoe UI", 11)
-    painter.setFont(font2)
-    painter.drawText(0, 160, 600, 60, Qt.AlignCenter, "Institutional Trading System | R_ Sintéticos")
-    painter.setPen(QColor("#4a6080"))
-    font3 = QFont("Segoe UI", 9)
-    painter.setFont(font3)
-    painter.drawText(0, 230, 600, 40, Qt.AlignCenter, "Maicom Jordan dos Santos Danone")
-    painter.drawText(0, 255, 600, 40, Qt.AlignCenter, "Inicializando 10 estratégias...")
-    painter.end()
-    splash = QSplashScreen(pm)
-    splash.setWindowFlag(Qt.WindowStaysOnTopHint)
-    return splash
+DEFAULT_MODE = os.getenv("DEFAULT_MODE", "demo")
 
-def main():
-    app = QApplication(sys.argv)
-    app.setApplicationName("Deriv Institutional Bot")
-    app.setStyle("Fusion")
-    font = QFont("Segoe UI", 10)
-    app.setFont(font)
-    splash = create_splash()
-    splash.show()
-    app.processEvents()
-    from ui.main_window import MainWindow
-    window = MainWindow()
-    def show_main():
-        splash.finish(window)
-        window.show()
-    QTimer.singleShot(1800, show_main)
-    sys.exit(app.exec())
+
+async def run(mode: str = DEFAULT_MODE):
+    print(f"\n{'='*50}")
+    print(f"  BotDeriv1 | Modo: {mode.upper()}")
+    print(f"{'='*50}\n")
+
+    client = DerivClient(mode=mode)
+
+    # ── Conecta e autentica automaticamente ──────────────────
+    connected = await client.connect()
+    if not connected:
+        print("Falha na conexão. Verifique o .env e tente novamente.")
+        return
+
+    print(f"\n✓ Conta:  {client.get_loginid()}")
+    print(f"✓ Saldo:  {client.get_balance()} {client.get_currency()}")
+    print(f"✓ Tipo:   {'DEMO (Virtual)' if client.is_demo() else 'REAL'}\n")
+
+    # ── Exemplo: trocar entre demo e real em tempo real ───────
+    # await client.switch_account("real")
+    # await client.switch_account("demo")
+
+    # ── Aqui vai a lógica principal do bot ───────────────────
+    # from bot.strategies import run_strategy
+    # await run_strategy(client)
+
+    await client.disconnect()
+
 
 if __name__ == "__main__":
-    main()
+    import sys
+    mode = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_MODE
+    if mode not in ("demo", "real"):
+        print("Uso: python main.py [demo|real]")
+        import sys; sys.exit(1)
+    asyncio.run(run(mode))

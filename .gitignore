@@ -1,25 +1,24 @@
+# Credenciais — NUNCA commitar
+.env
+*.env
+.env.*
+
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-
-# Environments
-.env
-.venv
-env/
+*.pyo
+*.pyd
+.venv/
 venv/
-ENV/
+env/
 
-# Database
+# Banco de dados local
 *.db
 *.sqlite3
 
 # Logs
 *.log
-
-# IDE
-.vscode/
-.idea/
+logs/
 
 # OS
 .DS_Store
