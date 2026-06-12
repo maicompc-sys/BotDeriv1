@@ -1,17 +1,19 @@
-# Credenciais — NUNCA commitar
+# Ambiente virtual
+venv/
+.venv/
+env/
+
+# Variáveis de ambiente — NUNCA commitar
 .env
-*.env
 .env.*
-.tokens.json
+!.env.example
 
 # Python
 __pycache__/
 *.py[cod]
-*.pyo
-*.pyd
-.venv/
-venv/
-env/
+*.egg-info/
+dist/
+build/
 
 # Banco de dados local
 *.db
@@ -20,6 +22,11 @@ env/
 # Logs
 *.log
 logs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
 
 # OS
 .DS_Store
