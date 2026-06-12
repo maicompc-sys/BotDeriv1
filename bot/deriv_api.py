@@ -1,5 +1,6 @@
 """
 deriv_api.py — Deriv API Client com autenticação automática PAT
+Suporta tokens alfanuméricos (nova API developers.deriv.com).
 Suporta troca entre conta DEMO e REAL sem digitar nada.
 """
 
@@ -7,6 +8,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 import websockets
@@ -28,6 +30,36 @@ ACCOUNT_MODES = {
     "real": DERIV_TOKEN_REAL,
 }
 
+# Padrão dos novos tokens alfanuméricos da Deriv (ex: pat_xxx... ou token de 64 chars hex)
+_PAT_PATTERN   = re.compile(r"^pat_[a-f0-9]{64}$")
+_LEGACY_PATTERN = re.compile(r"^[A-Za-z0-9]{15,32}$")
+
+
+def validate_token(token: str) -> str:
+    """
+    Valida e identifica o formato do token Deriv.
+    Retorna: 'pat_alphanumeric' | 'legacy' | 'unknown'
+    """
+    if not token:
+        return "empty"
+    if _PAT_PATTERN.match(token):
+        return "pat_alphanumeric"
+    if _LEGACY_PATTERN.match(token):
+        return "legacy"
+    return "unknown"
+
+
+def validate_app_id(app_id: str) -> bool:
+    """
+    Valida o App ID alfanumérico da nova API Deriv (developers.deriv.com).
+    Formato novo: string alfanumérica (ex: 33wQj4vvambGV9iRyHOTh)
+    Formato legado: string numérica (ex: 1089)
+    """
+    if not app_id:
+        return False
+    # Aceita tanto numérico puro (legado) quanto alfanumérico (novo)
+    return bool(re.match(r"^[A-Za-z0-9_-]{4,30}$", app_id))
+
 
 # ─── Cliente principal ────────────────────────────────────────────────────────
 
@@ -35,6 +67,7 @@ class DerivAPIClient:
     """
     Cliente assíncrono para a Deriv API v3.
     - Autenticação 100% automática via PAT (sem input manual)
+    - Suporte a tokens alfanuméricos (nova API developers.deriv.com)
     - Troca entre conta DEMO e REAL em tempo real (switch_account)
     - Reconexão automática com backoff exponencial
     """
@@ -56,6 +89,7 @@ class DerivAPIClient:
         self.is_authorized  = False
         self.account_info:  Dict = {}
         self.all_accounts:  List[Dict] = []
+        self.token_format:  str = "unknown"
 
     # ─── Validação ────────────────────────────────────────────────────────────
 
@@ -69,8 +103,21 @@ class DerivAPIClient:
         if not token:
             raise EnvironmentError(
                 f"Token para modo '{self.mode}' não encontrado no .env.\n"
-                f"Defina DERIV_API_TOKEN_{'REAL' if self.mode == 'real' else 'DEMO'}"
+                f"Defina DERIV_API_TOKEN_{'REAL' if self.mode == 'real' else 'DEMO'}\n"
+                f"Gere seu token em: https://developers.deriv.com"
             )
+        fmt = validate_token(token)
+        self.token_format = fmt
+        if fmt == "empty":
+            raise EnvironmentError("Token vazio no .env")
+        if fmt == "unknown":
+            logger.warning(
+                f"[{self.mode.upper()}] Formato de token não reconhecido. "
+                f"Esperado: pat_<64-hex> (novo) ou alfanumérico 15-32 chars (legado). "
+                f"Token: {token[:12]}..."
+            )
+        else:
+            logger.info(f"[{self.mode.upper()}] Formato de token detectado: {fmt}")
         return token
 
     # ─── Conexão ─────────────────────────────────────────────────────────────
@@ -78,7 +125,17 @@ class DerivAPIClient:
     async def connect(self) -> bool:
         """Conecta e autentica automaticamente. Sem input do usuário."""
         if not DERIV_APP_ID:
-            raise EnvironmentError("DERIV_APP_ID não encontrado no .env")
+            raise EnvironmentError(
+                "DERIV_APP_ID não encontrado no .env\n"
+                "Gere seu App ID em: https://developers.deriv.com"
+            )
+
+        if not validate_app_id(DERIV_APP_ID):
+            raise EnvironmentError(
+                f"DERIV_APP_ID inválido: '{DERIV_APP_ID}'\n"
+                f"O App ID deve ser alfanumérico (4-30 chars).\n"
+                f"Gere um novo em: https://developers.deriv.com"
+            )
 
         logger.info(f"[{self.mode.upper()}] Conectando em {WS_ENDPOINT}")
         try:
@@ -108,18 +165,29 @@ class DerivAPIClient:
     async def _authorize(self) -> Dict:
         """
         Envia o PAT correto para o modo atual e armazena info das contas.
+        Suporta tokens alfanuméricos (pat_xxx) e legados.
         Totalmente automático — sem nenhum input do usuário.
         """
         token = self._get_token()
-        logger.info(f"[{self.mode.upper()}] Autenticando com PAT...")
+        logger.info(
+            f"[{self.mode.upper()}] Autenticando com PAT "
+            f"(formato: {self.token_format})..."
+        )
 
         response = await self._send({"authorize": token})
 
         if response.get("error"):
             err = response["error"]
+            code = err.get('code', '')
+            msg  = err.get('message', '')
+            hint = ""
+            if code in ("InvalidToken", "InvalidAppID"):
+                hint = (
+                    "\n→ Verifique suas credenciais em https://developers.deriv.com"
+                    "\n→ O token deve ter escopos: read, trade, trading_information"
+                )
             raise PermissionError(
-                f"[{self.mode.upper()}] Autenticação falhou: "
-                f"[{err.get('code')}] {err.get('message')}"
+                f"[{self.mode.upper()}] Autenticação falhou: [{code}] {msg}{hint}"
             )
 
         auth = response.get("authorize", {})
@@ -131,7 +199,8 @@ class DerivAPIClient:
             f"[{self.mode.upper()}] ✓ Autenticado | "
             f"Conta: {auth.get('loginid')} | "
             f"Saldo: {auth.get('balance')} {auth.get('currency')} | "
-            f"Tipo: {'Virtual/Demo' if auth.get('is_virtual') else 'Real'}"
+            f"Tipo: {'Virtual/Demo' if auth.get('is_virtual') else 'Real'} | "
+            f"Token: {self.token_format}"
         )
         return auth
 
@@ -169,6 +238,16 @@ class DerivAPIClient:
 
     def is_demo(self) -> bool:
         return bool(self.account_info.get("is_virtual", False))
+
+    def get_token_info(self) -> Dict:
+        """Retorna informações sobre o token em uso (sem expor o valor)."""
+        token = ACCOUNT_MODES.get(self.mode, "")
+        return {
+            "mode": self.mode,
+            "format": self.token_format,
+            "prefix": token[:8] + "..." if token else "(vazio)",
+            "authorized": self.is_authorized,
+        }
 
     # ─── Ping ─────────────────────────────────────────────────────────────────
 
@@ -390,7 +469,10 @@ class DerivAPIClient:
 
                 err_code = msg.get("error", {}).get("code", "")
                 if err_code in ("InvalidToken", "AuthorizationRequired"):
-                    logger.critical("Token inválido/expirado!")
+                    logger.critical(
+                        "Token inválido/expirado! "
+                        "Gere um novo em https://developers.deriv.com"
+                    )
                     self.is_authorized = False
 
         except websockets.exceptions.ConnectionClosedError as e:
@@ -427,6 +509,10 @@ class DerivClient(DerivAPIClient):
                 ok = await super().connect()
                 if ok:
                     return True
+            except PermissionError as e:
+                # Erro de credencial — não adianta reconectar
+                logger.error(f"Erro de autenticação (não tentará reconectar): {e}")
+                return False
             except Exception as e:
                 delay = min(self.base_delay * (2 ** (attempt - 1)), 120)
                 logger.warning(
